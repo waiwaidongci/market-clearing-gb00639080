@@ -1,6 +1,7 @@
 import {plot} from '../components/common/chart.js';
 import {feedback} from '../components/common/fields.js';
 import {empty, metrics, panel, pill} from '../components/common/panels.js';
+import {reportProof} from '../components/common/proof.js';
 import {table} from '../components/common/table.js';
 import {REVIEW, STATUS} from '../constants/enums.js';
 import {handler, poll} from '../hooks/action.js';
@@ -33,7 +34,8 @@ export async function results(route, refresh) {
   const result = job.result;
   const analysis = result ? el('section',{class:'analysis','data-testid':'analysis-complete'},
     el('div',{class:'result-head'},p(job.name,'eyeline'),h(2,result.headline),p(result.note,'intro-copy'),
-      el('div',{class:'actions'},pill(STATUS[job.status],job.status),download,message)),
+      el('div',{class:'actions'},pill(STATUS[job.status],job.status),download,message),
+      job.report && reportProof(job.report)),
     metrics(result.metrics),
     result.charts.map(plot),
     (result.sections || []).map(item=>panel(item.title,p(item.text))),

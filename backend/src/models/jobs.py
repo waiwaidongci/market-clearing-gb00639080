@@ -41,6 +41,31 @@ class Run(Base):
     created_at: Mapped[datetime] = mapped_column(default=now)
     finished_at: Mapped[datetime | None]
 
+class ReportSeal(Base):
+    """Immutable credential left when review accepts the report.
+
+    It pins the report bytes by checksum and keeps everything needed to rebuild
+    the original: the ledger batch identity, clearing parameters, the rules
+    digest, the layout version, and a result snapshot for rule updates.
+    """
+
+    __tablename__ = 'report_seals'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey('runs.id'), unique=True, index=True)
+    filename: Mapped[str] = mapped_column(String(100))
+    checksum: Mapped[str] = mapped_column(String(64))
+    size: Mapped[int]
+    layout_version: Mapped[str] = mapped_column(String(20))
+    rules_digest: Mapped[str] = mapped_column(String(64))
+    dataset_id: Mapped[int] = mapped_column(ForeignKey('datasets.id'))
+    dataset_checksum: Mapped[str] = mapped_column(String(64))
+    params: Mapped[dict] = mapped_column(JSON)
+    result: Mapped[dict] = mapped_column(JSON)
+    sealed_by: Mapped[str] = mapped_column(String(64))
+    sealed_at: Mapped[datetime] = mapped_column(default=now)
+
+
 class Delivery(Base):
     __tablename__ = 'deliveries'
 

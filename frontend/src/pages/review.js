@@ -1,5 +1,6 @@
 import {feedback, field} from '../components/common/fields.js';
 import {empty, panel, pill} from '../components/common/panels.js';
+import {reportProof} from '../components/common/proof.js';
 import {REVIEW} from '../constants/enums.js';
 import {handler} from '../hooks/action.js';
 import {session} from '../stores/session.js';
@@ -32,6 +33,7 @@ export async function reviewPage(route, refresh) {
     panel(job.name, p(job.result.headline,'intro-copy'), p(job.result.note),
       link('查看计算证据',`#results/${id}`,{class:'quiet'}),
       pill(REVIEW[job.review],job.review),
+      job.review === 'accepted' && job.report && reportProof(job.report),
       job.review_note && el('div',{class:'decision'},p(job.decision),p(job.review_note)),
       job.review === 'pending' && (session.canReview ? reviewForm(job,spec,refresh) : p('等待业务负责人复核。','subtle'))),
     panel('可复核记录', el('ul',{class:'method-list'}, completed.map(run =>

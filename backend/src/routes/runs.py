@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from src.config.database import connection
@@ -8,9 +8,10 @@ from src.constants.enums import Review, Role, Status
 from src.controllers.auth import allow, current
 from src.domain.spec import SPEC
 from src.models.identity import User
-from src.models.jobs import Run
+from src.models.jobs import ReportSeal, Run
 from src.models.source import Dataset
 from src.schemas.requests import ReviewRequest, RunRequest
+from src.services import reports
 from src.services.audit import record
 from src.services.validation import normalize_params
 from src.utils import views
@@ -28,7 +29,15 @@ def require_job(db, run_id, lock=False):
 
 @router.get('')
 def index(db: Session = Depends(connection), actor: User = Depends(current)):
-    return [views.run(item) for item in db.scalars(select(Run).order_by(Run.id.desc()).limit(100))]
+    return [views.run(item, seal=seal, seal_status=reports.inspect(seal) if seal else None)
+            for item, seal in _runs_with_seals(db, 100)]
+
+
+def _runs_with_seals(db, limit):
+    runs = list(db.scalars(select(Run).order_by(Run.id.desc()).limit(limit)))
+    seals = {seal.run_id: seal for seal in db.scalars(
+        select(ReportSeal).where(ReportSeal.run_id.in_([run.id for run in runs])))} if runs else {}
+    return [(run, seals.get(run.id)) for run in runs]
 
 
 @router.post('', status_code=202)
@@ -47,18 +56,38 @@ def create(body: RunRequest, db: Session = Depends(connection),
 
 @router.get('/{run_id}')
 def detail(run_id: int, db: Session = Depends(connection), actor: User = Depends(current)):
-    return views.run(require_job(db, run_id), detail=True)
+    item = require_job(db, run_id)
+    seal_row = db.scalar(select(ReportSeal).where(ReportSeal.run_id == item.id))
+    return views.run(item, detail=True, seal=seal_row,
+                     seal_status=reports.inspect(seal_row) if seal_row else None)
 
 
 @router.get('/{run_id}/export')
 def export(run_id: int, db: Session = Depends(connection), actor: User = Depends(current)):
-    item = require_job(db, run_id)
+    # Lock the run row so concurrent downloads serialize around a rebuild.
+    item = require_job(db, run_id, lock=True)
     if not item.export_file:
         raise HTTPException(409, '此记录尚无可下载结果')
-    path = ARTIFACTS / item.export_file
-    if not path.is_file():
-        raise HTTPException(410, '导出文件已不可用，请重新运行')
-    return FileResponse(path, media_type='text/csv', filename=f'{SPEC["short_name"]}-{item.id}.csv')
+    seal_row = db.scalar(select(ReportSeal).where(ReportSeal.run_id == item.id))
+    if seal_row is None:
+        path = ARTIFACTS / item.export_file
+        if not path.is_file():
+            raise HTTPException(410, '导出文件已不可用，请重新运行')
+        payload = path.read_bytes()
+        filename = f'{SPEC["short_name"]}-{item.id}.csv'
+        checksum = ''
+    else:
+        payload, status = reports.prepare_download(db, seal_row, actor.username)
+        if payload is None:
+            db.commit()
+            raise HTTPException(409, f'报告无法校验，已暂停下载：{status.reason}')
+        db.commit()
+        filename = f'{SPEC["short_name"]}-{item.id}.csv'
+        checksum = seal_row.checksum
+    return Response(content=payload, media_type='text/csv',
+                    headers={'Content-Disposition': f'attachment; filename="{filename}"',
+                             'X-Report-Checksum': checksum,
+                             'X-Report-Integrity': 'verified' if checksum else 'unsealed'})
 
 
 @router.post('/{run_id}/review')
@@ -75,6 +104,16 @@ def review(run_id: int, body: ReviewRequest, db: Session = Depends(connection),
     if modes and body.decision and body.decision not in modes:
         raise ValueError('请选择项目支持的处置决定')
     item.review, item.review_note, item.decision = body.review, body.note, body.decision or None
-    record(db, actor.username, f'review.{item.review}', item.id, note=body.note, decision=item.decision)
+    sealed = None
+    if body.review == Review.ACCEPTED:
+        try:
+            sealed, _ = reports.seal(db, item, actor)
+        except ValueError as error:
+            db.rollback()
+            raise HTTPException(409, str(error)) from None
+    record(db, actor.username, f'review.{item.review}', item.id, note=body.note, decision=item.decision,
+           checksum=sealed.checksum if sealed else None)
     db.commit()
-    return views.run(item, detail=True)
+    seal_row = db.scalar(select(ReportSeal).where(ReportSeal.run_id == item.id))
+    return views.run(item, detail=True, seal=seal_row,
+                     seal_status=reports.inspect(seal_row) if seal_row else None)
